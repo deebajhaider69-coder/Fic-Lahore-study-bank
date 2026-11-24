@@ -1,0 +1,144 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function isSuperAdmin() {
+      return request.auth != null
+        && request.auth.uid == "sOWR2B0EvOWh8I8iuAF956a0dRw2"
+        && request.auth.token.email == "fworkuseee@gmail.com";
+    }
+
+    function teacherPath(uid) {
+      return /databases/$(database)/documents/teachers/$(uid);
+    }
+
+    function isActiveTeacher() {
+      return request.auth != null
+        && exists(teacherPath(request.auth.uid))
+        && get(teacherPath(request.auth.uid)).data.status == "active";
+    }
+
+    function teacherRecord() {
+      return get(teacherPath(request.auth.uid)).data;
+    }
+
+    function teacherCanWriteQuestion(data) {
+      return isActiveTeacher()
+        && data.subject == teacherRecord().subject
+        && data.question is string
+        && data.options is list
+        && data.options.size() == 4
+        && data.answerIndex is int
+        && data.answerIndex >= 0
+        && data.answerIndex <= 3
+        && ("year" in data)
+        && data.year in ["1st Year", "2nd Year"]
+        && (teacherRecord().year == "Both" || data.year == teacherRecord().year);
+    }
+
+    function teacherCanManageQuestion(data) {
+      return isActiveTeacher()
+        && data.subject == teacherRecord().subject
+        && (
+          (!("year" in data) && teacherRecord().year == "1st Year")
+          || (
+            ("year" in data)
+            && data.year in ["1st Year", "2nd Year"]
+            && (teacherRecord().year == "Both" || data.year == teacherRecord().year)
+          )
+        );
+    }
+
+    function teacherCanCreateUploadMetadata(data) {
+      return isActiveTeacher()
+        && data.recordType == "uploadMetadata"
+        && data.subject == teacherRecord().subject
+        && data.yearCounts is map;
+    }
+
+    function teacherCanUpdateUploadMetadata(oldData, newData) {
+      return teacherCanCreateUploadMetadata(newData)
+        && oldData.recordType == "uploadMetadata"
+        && oldData.subject == teacherRecord().subject
+        && (
+          teacherRecord().year == "Both"
+          || (
+            oldData.yearCounts is map
+            && oldData.yearCounts[teacherRecord().year == "1st Year" ? "2nd Year" : "1st Year"]
+              == newData.yearCounts[teacherRecord().year == "1st Year" ? "2nd Year" : "1st Year"]
+          )
+          || (
+            teacherRecord().year == "1st Year"
+            && !("yearCounts" in oldData)
+            && oldData.count == newData.yearCounts["1st Year"]
+            && newData.yearCounts["2nd Year"] == 0
+          )
+        );
+    }
+
+    function teacherCanDeleteUploadMetadata(data) {
+      return isActiveTeacher()
+        && data.recordType == "uploadMetadata"
+        && data.subject == teacherRecord().subject
+        && (
+          teacherRecord().year == "Both"
+          || (
+            data.yearCounts is map
+            && data.yearCounts[teacherRecord().year == "1st Year" ? "2nd Year" : "1st Year"] == 0
+          )
+          || (teacherRecord().year == "1st Year" && !("yearCounts" in data))
+        );
+    }
+
+    // teachers/{uid} stores {uid, fullName, email, subject, year, status}.
+    // Only the pinned Super Admin may list or change teacher records; teachers may read their own.
+    match /teachers/{teacherUid} {
+      allow get: if isSuperAdmin() || (request.auth != null && request.auth.uid == teacherUid);
+      allow list: if isSuperAdmin();
+      allow create, update, delete: if isSuperAdmin();
+    }
+
+    // teacher_requests/{requestId} stores identity and requested assignment only.
+    // Passwords must never be stored here; the requester creates an unprivileged Auth account separately.
+    match /teacher_requests/{requestId} {
+      allow create: if request.auth != null
+        && request.resource.data.keys().hasOnly([
+          "uid", "fullName", "email", "requestedSubject", "requestedYear", "status", "createdAt"
+        ])
+        && request.resource.data.uid == request.auth.uid
+        && request.resource.data.fullName is string
+        && request.resource.data.email is string
+        && request.resource.data.requestedSubject is string
+        && request.resource.data.requestedYear in ["1st Year", "2nd Year", "Both"]
+        && request.resource.data.status == "pending";
+      allow get, list: if isSuperAdmin()
+        || (request.auth != null && resource.data.uid == request.auth.uid);
+      allow update, delete: if isSuperAdmin();
+    }
+
+    // Legacy authorization documents are no longer role grants.
+    match /authorizedTeachers/{teacherUid} {
+      allow get: if isSuperAdmin() || (request.auth != null && request.auth.uid == teacherUid);
+      allow list, create, update, delete: if false;
+    }
+
+    // mcqs remains publicly readable for students. Writes are restricted by subject and,
+    // for non-super-admin teachers, by the year assignment stored in teachers/{uid}.
+    // uploadMetadata records are subject-scoped; teachers cannot change the other year's count.
+    match /mcqs/{questionId} {
+      allow read: if true;
+      allow create: if isSuperAdmin()
+        || teacherCanWriteQuestion(request.resource.data)
+        || teacherCanCreateUploadMetadata(request.resource.data);
+      allow update: if isSuperAdmin()
+        || (
+          teacherCanManageQuestion(resource.data)
+          && teacherCanWriteQuestion(request.resource.data)
+        )
+        || teacherCanUpdateUploadMetadata(resource.data, request.resource.data);
+      allow delete: if isSuperAdmin()
+        || teacherCanManageQuestion(resource.data)
+        || teacherCanDeleteUploadMetadata(resource.data);
+    }
+  }
+}
